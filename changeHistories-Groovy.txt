@@ -1,0 +1,49 @@
+import java.util.Date;
+import java.sql.Timestamp;
+import java.util.Calendar;
+import java.text.DateFormat;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
+import com.atlassian.jira.issue.Issue;
+import com.atlassian.jira.ComponentManager;
+import com.atlassian.jira.component.ComponentAccessor
+import com.atlassian.jira.issue.CustomFieldManager;
+import com.atlassian.jira.issue.MutableIssue;
+import com.atlassian.jira.issue.IssueManager;
+import org.apache.log4j.Category;
+import org.apache.log4j.Logger;
+import com.atlassian.jira.issue.util.DefaultIssueChangeHolder
+import com.atlassian.jira.issue.util.IssueChangeHolder;
+import com.atlassian.jira.issue.fields.layout.field.FieldLayoutItem;
+import com.atlassian.jira.issue.ModifiedValue;
+import com.atlassian.jira.crowd.embedded.ofbiz.db.OfBizHelper;
+import com.atlassian.jira.issue.history.ChangeItemBean;
+import com.atlassian.jira.issue.changehistory.ChangeHistory;
+import com.atlassian.jira.issue.changehistory.ChangeHistoryManager;
+import com.atlassian.jira.issue.changehistory.ChangeHistoryItem;
+import groovy.transform.Field
+
+
+@Field String finalMessage = ""
+
+def logMessage(Object message) {
+    finalMessage += "${message} ,,, "
+}
+
+// Get access to the required issue managers
+//def componentManager = ComponentManager.getInstance()
+def issueManager = ComponentAccessor.getIssueManager()
+def myIssue = issueManager.getIssueObject("PDP-27910")
+
+
+// def issueManager = componentManager.getIssueManager()
+def changeHistoryManager = ComponentAccessor.getChangeHistoryManager()
+    // ComponentManager.getInstance().getChangeHistoryManager()
+
+List MyChangeHistory = changeHistoryManager.getAllChangeItems(myIssue)
+//  SubIssues.each { SubIssue -> logMessage formatIssue(SubIssue) }
+MyChangeHistory.each { Itemz -> logMessage Itemz.getTos() }
+
+return finalMessage
+
+// issueManager.getAllChangeItems(myIssue)
