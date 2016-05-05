@@ -1,0 +1,175 @@
+import com.atlassian.jira.component.ComponentAccessor
+import com.atlassian.jira.config.properties.APKeys
+import com.atlassian.jira.issue.MutableIssue
+import com.atlassian.jira.issue.search.SearchProvider
+import com.atlassian.jira.jql.parser.JqlQueryParser
+import com.atlassian.jira.web.bean.PagerFilter
+import groovy.transform.Field
+  
+// use @Field annotation to make variable accessible outside of function scope
+@Field String finalMessage = ""
+@Field String jqlQuery = ""
+@Field String jqlSubQuery = ""
+@Field String MainQuery = ""
+@Field String rowColor = ""
+@Field String fontDecor = ""  
+
+ 
+//             HOW IT WORKS:
+//          1. Modify MainQuery below to pull initial set of issues
+//          2. Modify jqlSubQuery to iterate results from #1 - secondary query will run for each issue from MainQuery
+//          3. Script will fail due to timeout if jql returns too many issues
+//          4. to add colour variety - get color here: http://www.colors.commutercreative.com/grid/ and add switch matching issueType id below (Section "Color Scheme")
+ 
+  
+def logIssues(Collection<MutableIssue> issues) {
+    issues.each { issue -> IterateIssues(issue) }
+}
+  
+  
+def IterateIssues(MutableIssue issue) {
+    logMessage formatIssue(issue)
+     
+    //    #### >>>>  SECONDARY JQL QUERY <-- Results from Main Query will be iterated through it    <<<< #### 
+    //    #### >>>>                    COMMENT SUBQUERY to disable running second JQL               <<<< #### 
+    //jqlSubQuery = 'project = pdp and issuetype = Bug and issueFunction in linkedIssuesOf("issue = ' + issue.key + '", "relates to")'
+    jqlSubQuery = 'project = pdpii and issuetype in ("System Story","Guidewire Story Card", "Creative Story") and fixVersion = "Release 2" and issueFunction in linkedIssuesOf("issue = ' + issue.key + '", "includes")'
+    //    #### >>>>  SECONDARY JQL QUERY    <<<< ####
+    
+    if ( jqlSubQuery != "" ) {
+    
+     def SubIssues = findIssues(jqlSubQuery)
+     SubIssues.each { SubIssue -> logMessage formatIssue(SubIssue) }
+     }
+ }
+  
+// output is collected in one large block, in variable finalMessage
+def logMessage(Object message) {
+    finalMessage += "${message}"
+}
+def logImportantMessage(Object message) {
+    logMessage "<strong>${message}</strong>"
+}
+  
+def logSubIssues(Collection<MutableIssue> SubIssues) {
+     
+    SubIssues.each { SubIssue -> logMessage formatIssue(SubIssue) }
+}
+  
+  
+// formatIssue is constructing lines of html matching output html table format.
+  
+def formatIssue(MutableIssue issueF) {
+    def issueLink = getIssueLink(issueF)
+    def htmlLink = "<a href=\"${issueLink}\">${issueF.key}</a>"
+  
+//    COLOR SCHEME
+// this block paints line depending on issue type
+rowColor=""
+fontDecor=""
+    
+    switch(issueF.issueType.id) {
+        // Bug 
+        case  "1": rowColor = "background-color:lavender"
+            break
+        //Test
+        case "10900": rowColor = "background-color:beige"
+            break  
+        // Task
+        case "3": rowColor = "background-color:burlywood"
+            break
+        // Guidewire story card
+        case "10103": rowColor = "background-color:beige"
+            break
+        // Impediment
+        case "10201": rowColor = "background-color:azure"
+            break
+        // Creative Story
+        case "11205": rowColor = "background-color:pink"
+            break                
+        // User Story
+        case "10001": rowColor = "background-color:white"
+                      fontDecor = "font-weight:bold"
+            break
+        // System Story
+        case "2": rowColor = "background-color:cornsilk"
+            break
+                default: rowColor = "background-color:yellow"
+    }
+     
+def ScrumTeam = ComponentAccessor.getCustomFieldManager().getCustomFieldObjectByName("Scrum Team")
+    def ScrumTeamName = ScrumTeam.getValue(issueF)
+def Domain = ComponentAccessor.getCustomFieldManager().getCustomFieldObjectByName("Domain")
+    def DomainName = Domain.getValue(issueF)
+def StoryPoints = ComponentAccessor.getCustomFieldManager().getCustomFieldObjectByName("Story Points")
+    def StoryPointsName = StoryPoints.getValue(issueF)
+            
+    
+    
+    
+    "<tr style=${rowColor}><td>$htmlLink</td><td>${issueF.issueType.name}</td><td style=${fontDecor}>${issueF.summary}</td><td>${ScrumTeamName}</td><td>${DomainName}</td><td>${StoryPointsName}</td><td>${issueF.getFixVersions() }</td><td>${issueF.status.name}</td><td>${issueF.resolution?.name}</td></tr>"
+    //"<tr style=background-color:${rowColor}><td>$htmlLink</td><td>${issueF.issueType.id}</td><td>${issueF.summary}</td><td>${issueF.status.name}</td><td>${issueF.resolution.name}</td></tr>"
+}
+  
+// this function constructs issue links for further use in output
+def getIssueLink(MutableIssue issueA) {
+    def properties = ComponentAccessor.applicationProperties
+    def jiraBaseUrl = properties.getString(APKeys.JIRA_BASEURL)
+    "${jiraBaseUrl}/browse/${issueA.key}"
+}
+  
+// this function returns list of issues for JQL
+def findIssues(String jqlQuery) {
+    def issueManager = ComponentAccessor.issueManager
+    def user = ComponentAccessor.jiraAuthenticationContext.user
+    def jqlQueryParser = ComponentAccessor.getComponent(JqlQueryParser.class)
+    def searchProvider = ComponentAccessor.getComponent(SearchProvider.class)
+    def query = jqlQueryParser.parseQuery(jqlQuery)
+    def results = searchProvider.search(query, user, PagerFilter.unlimitedFilter)
+    results.issues.collect { issue -> issueManager.getIssueObject(issue.id) }
+}
+   
+def mainMethod() {
+    // This script must be run from Jira -> Administration -> Add-ons -> Script Console
+    //MainQuery = 'project = PDP AND issuetype = Test AND "Phase Created" = "System Integration Testing" AND Resolution in (Unresolved, Done) AND summary ~ "SIT_SC1.*"'
+     
+    //    #### >>>>  MAIN JQL QUERY    <<<< #### , "Creative Story", "Guidewire Story Card") 0000 ''project = pdpii and issuetype "System Story" and issueFunction not in linkedIssuesOf('project=pdpii and issuetype="user story"', "includes")''
+        MainQuery = 'filter = "not sow - 2"'
+    //    #### >>>>  MAIN JQL QUERY    <<<< ####
+     
+     
+    logImportantMessage "Main query: <pre>${MainQuery}</pre>"
+  
+// Setting up table and table header. Truple quotes for multi-line content
+  
+    def tableStart = """
+    <table id="issueTable" class="aui aui-table-sortable">
+    <thead>
+    <tr>
+        <th class="aui-table-column-issue-key">Issue</th>
+        <th>Issue Type</th>
+        <th>Summary</th>
+		<th>Scrum Team</th>
+        <th>Domain</th>
+        <th>Story Points</th>
+        <th>FixVersion/s</th>
+
+        <th>Status</th>
+        <th>Resolution</th>
+    </tr>
+    </thead>
+    <tbody>
+    """
+  
+  
+    logMessage tableStart
+   
+    def issues = findIssues(MainQuery)
+     
+    logIssues(issues)
+  
+    def tableEnd = "</tbody></table>"
+    logMessage tableEnd
+    return finalMessage // the returned value is shown after the execution in Jira's Web Script Console
+}
+mainMethod()
