@@ -22,7 +22,7 @@ import com.atlassian.jira.issue.changehistory.ChangeHistory;
 import com.atlassian.jira.issue.changehistory.ChangeHistoryManager;
 import com.atlassian.jira.issue.changehistory.ChangeHistoryItem;
 import groovy.transform.Field
-
+//
 
 @Field String finalMessage = ""
 
