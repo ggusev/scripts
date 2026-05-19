@@ -1,0 +1,230 @@
+/* ============================================================================
+ * Jama Tree Discovery — Phase 0
+ * ----------------------------------------------------------------------------
+ * Starts from a container item (e.g. 760391 "OBPSW Sandbox"), recursively
+ * walks /rest/v1/items/{id}/children, builds an in-memory parent->child map,
+ * and prints the full subtree to runnerLog.
+ *
+ * No Jira issues are created in this phase — discovery only.
+ * Once the tree shape and field structure are confirmed, plug a CreateORUpdate
+ * call inside ProcessItem() like the Primavera script.
+ * ========================================================================== */
+
+/* ---------- CONFIG ---------- */
+string JAMA_HOST       = "https://jama.com";
+string JAMA_CLIENT_ID  = "PUT_CLIENT_ID_HERE";
+string JAMA_SECRET     = "PUT_CLIENT_SECRET_HERE";
+number STARTING_ITEM   = 760391;     // OBPSW Sandbox container from screenshot
+number MAX_RESULTS     = 50;         // Jama page size, max 50
+number MAX_DEPTH       = 20;         // runaway guard
+number RATE_LIMIT_MS   = 150;        // ~6 req/s, well under Jama's 10 req/s
+
+/* ---------- STRUCTS ---------- */
+struct JamaToken {
+    string access_token;
+    string token_type;
+    number expires_in;
+}
+
+struct JamaParent {
+    number item;        // parent item id; null/0 if root
+    number project;     // present when item lives directly under project
+}
+
+struct JamaLocation {
+    number sortOrder;
+    number globalSortOrder;
+    string sequence;
+    JamaParent parent;
+}
+
+struct JamaItem {
+    number id;
+    string documentKey;
+    string globalId;
+    number itemType;
+    number project;
+    number childItemType;   // present on containers
+    JamaLocation location;
+    /* fields are dynamic ($itemTypeId suffix) — leave as raw string for now,
+       parse selectively when we know what we want */
+}
+
+struct PageMeta {
+    string status;
+    number startIndex;
+    number resultCount;
+    number totalResults;
+}
+
+/* ---------- GLOBALS ---------- */
+string ACCESS_TOKEN;
+HttpRequest API_REQ;          // reusable request with bearer
+number TotalItemsSeen   = 0;
+number TotalContainers  = 0;
+number TotalRequests    = 0;
+date   t0 = currentDate();
+
+/* ---------- HELPERS ---------- */
+
+function Indent(number level) {
+    string s = "";
+    for (number i = 0; i < level; i++) { s += "  "; }
+    return s;
+}
+
+function BuildAuthReq() {
+    HttpRequest req;
+    HttpHeader h;
+    h = httpCreateHeader("Accept", "application/json");
+    req.headers += h;
+    h = httpCreateHeader("Authorization", "Bearer " + ACCESS_TOKEN);
+    req.headers += h;
+    return req;
+}
+
+/* ---------- STEP 1: OAUTH TOKEN ----------
+ * POST /rest/oauth/token
+ *   Content-Type: application/x-www-form-urlencoded
+ *   Authorization: Basic base64(clientId:secret)
+ *   body: grant_type=client_credentials
+ */
+function GetAccessToken() {
+    string url = JAMA_HOST + "/rest/oauth/token";
+    string basic = base64Encode(JAMA_CLIENT_ID + ":" + JAMA_SECRET);
+
+    HttpRequest req;
+    HttpHeader h;
+    h = httpCreateHeader("Content-Type", "application/x-www-form-urlencoded");
+    req.headers += h;
+    h = httpCreateHeader("Authorization", "Basic " + basic);
+    req.headers += h;
+    h = httpCreateHeader("Accept", "application/json");
+    req.headers += h;
+
+    string body = httpPost(url, req, "grant_type=client_credentials");
+    number sc = httpGetStatusCode();
+    if (sc != 200) {
+        runnerLog("OAuth FAILED: status=" + sc + " body=" + body);
+        return "";
+    }
+
+    JamaToken tok = fromJson(body);
+    runnerLog("OAuth OK; token=" + substring(tok.access_token, 0, 12) + "... expires_in=" + tok.expires_in);
+    return tok.access_token;
+}
+
+/* ---------- STEP 2: GET ONE PAGE OF CHILDREN ---------- */
+function GetChildrenPage(number parentId, number startAt) {
+    string url = JAMA_HOST + "/rest/v1/items/" + parentId + "/children"
+                 + "?startAt=" + startAt + "&maxResults=" + MAX_RESULTS;
+    string body = httpGet(url, API_REQ);
+    TotalRequests++;
+    sysSleep("0.15s");   // gentle pacing; tune via RATE_LIMIT_MS if needed
+
+    number sc = httpGetStatusCode();
+    if (sc == 429) {
+        runnerLog("429 rate-limited on " + parentId + " startAt=" + startAt + " — backing off 5s");
+        sysSleep("5s");
+        body = httpGet(url, API_REQ);   // single retry
+        TotalRequests++;
+    } else if (sc != 200) {
+        runnerLog("GET children FAILED parent=" + parentId + " status=" + sc + " body=" + substring(body, 0, 300));
+        return "";
+    }
+    return body;
+}
+
+/* ---------- STEP 3: RECURSIVE DESCENT ----------
+ * Returns nothing — prints as it goes, increments counters.
+ */
+function WalkChildren(number parentId, number depth) {
+    if (depth > MAX_DEPTH) {
+        runnerLog(Indent(depth) + "!! MAX_DEPTH reached at parent=" + parentId);
+        return 0;
+    }
+
+    number startAt = 0;
+    number total   = -1;            // unknown until first page
+    boolean more   = true;
+
+    while (more) {
+        string body = GetChildrenPage(parentId, startAt);
+        if (length(body) == 0) { return 0; }
+
+        /* Parse: response shape is { meta: {...}, data: [items], links: {...} } */
+        PageMeta meta = fromJson(body).meta.pageInfo;
+        if (total < 0) { total = meta.totalResults; }
+
+        JamaItem[] children = fromJson(body).data;
+        number got = size(children);
+
+        for (number i = 0; i < got; i++) {
+            JamaItem it = children[i];
+            TotalItemsSeen++;
+
+            boolean isContainer = (it.childItemType > 0);
+            if (isContainer) { TotalContainers++; }
+
+            runnerLog(Indent(depth)
+                + (isContainer ? "[C] " : "    ")
+                + it.id
+                + " | " + it.documentKey
+                + " | itemType=" + it.itemType
+                + (isContainer ? " | childType=" + it.childItemType : "")
+                + " | seq=" + it.location.sequence);
+
+            /* HOOK: this is where CreateORUpdate(...) would go in Phase 1+ */
+            /* ProcessItem(it, parentJiraKey); */
+
+            if (isContainer) {
+                WalkChildren(it.id, depth + 1);
+            }
+        }
+
+        startAt += got;
+        more = (startAt < total) && (got > 0);
+    }
+    return total;
+}
+
+/* ============================================================================
+ * MAIN
+ * ========================================================================== */
+
+runnerLog("=== Jama Tree Discovery — start ===");
+runnerLog("Host=" + JAMA_HOST + "  StartingItem=" + STARTING_ITEM);
+
+/* 1. Auth */
+ACCESS_TOKEN = GetAccessToken();
+if (length(ACCESS_TOKEN) == 0) {
+    runnerLog("Aborting: no access token");
+    return;
+}
+API_REQ = BuildAuthReq();
+
+/* 2. Print the root item itself for context */
+string rootBody = httpGet(JAMA_HOST + "/rest/v1/items/" + STARTING_ITEM, API_REQ);
+TotalRequests++;
+if (httpGetStatusCode() != 200) {
+    runnerLog("Cannot fetch root item " + STARTING_ITEM + ": status=" + httpGetStatusCode());
+    return;
+}
+JamaItem root = fromJson(rootBody).data;
+runnerLog("ROOT: " + root.id + " | " + root.documentKey
+        + " | itemType=" + root.itemType
+        + " | childType=" + root.childItemType
+        + " | project=" + root.project);
+
+/* 3. Walk */
+WalkChildren(STARTING_ITEM, 1);
+
+/* 4. Summary */
+number elapsed = (currentDate() - t0) / 1000;
+runnerLog("=== DONE ===");
+runnerLog("Items seen:    " + TotalItemsSeen);
+runnerLog("Containers:    " + TotalContainers);
+runnerLog("API requests:  " + TotalRequests);
+runnerLog("Elapsed:       " + elapsed + "s");
+
+return TotalItemsSeen;
