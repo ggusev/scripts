@@ -1,0 +1,204 @@
+// --- CONFIG ------------------------------------------------------------------
+string PROJECT_OS1 = "OS1";
+string PROJECT_OSX = "OSX";
+
+string LEVEL_HIDDEN  = "default";   // hidden issues
+string LEVEL_VISIBLE = "visible";   // visible issues
+
+string PLACEHOLDER_ISSUE_TYPE = "Requirement";
+
+// Custom field for storing hash value
+string HASH_FIELD = "customfield_12500";
+
+// Regex to pull jama number from Jama-key : "Staging-TRD-48"
+string JAMA_KEY_REGEX = "[A-Za-z][A-Za-z0-9_]*-[A-Za-z][A-Za-z0-9_]*-\\d+";
+// Regex to pull suffix "-"
+string SUFFIX_REGEX = "-(\\d+)";
+
+number SAFETY_MAX_CREATE_PER_RUN = 50;
+
+function extractJamaKey(string summary) {
+    string m = matchText(summary, JAMA_KEY_REGEX);
+    if (isNull(m)) { return ""; }
+    return m;
+}
+
+function extractSuffix(string text) {
+    string m = matchText(text, SUFFIX_REGEX);
+    if (isNull(m) || length(m) == 0) { return -1; }
+    string digits = matchText(m, "\\d+");
+    if (isNull(digits) || length(digits) == 0) { return -1; }
+    return parseNumber(digits);
+}
+
+number extractKeyNumber(string issueKey) {
+    string[] parts = split(issueKey, "-");
+    if (arraySize(parts) < 2) { return -1; }
+    return parseNumber(parts[arraySize(parts) - 1]);
+}
+
+// Mapping OS1 
+runnerLog("[sync] === start ===");
+
+string[] os1_keys = selectIssues("project = " + PROJECT_OS1);
+runnerLog("[sync] OS1 issues: " + arraySize(os1_keys));
+
+string[] os1_by_suffix;
+string[] os1_jamakey_by_suffix;
+number max_os1_suffix = 0;
+
+for (number i = 0; i < arraySize(os1_keys); i++) {
+    string k = os1_keys[i];
+    string sm = summary(k);
+
+    string jama_key = extractJamaKey(sm);
+    if (length(jama_key) == 0) {
+        runnerLog("[sync] " + k + ": no Jama key in summary: " + sm);
+        continue;
+    }
+
+    number suffix = extractSuffix(jama_key);
+    if (suffix < 0) {
+        runnerLog("[sync] " + k + ": no suffix in: " + jama_key);
+        continue;
+    }
+
+    string sx = string(suffix);
+    if (isNotNull(os1_by_suffix[sx])) {
+        runnerLog("[sync] suffix collision: " + os1_by_suffix[sx] + " and " + k);
+    }
+    os1_by_suffix[sx] = k;
+    os1_jamakey_by_suffix[sx] = jama_key;
+
+    if (suffix > max_os1_suffix) { max_os1_suffix = suffix; }
+}
+
+runnerLog("[sync] max OS1 suffix = " + max_os1_suffix);
+
+if (max_os1_suffix == 0) {
+    runnerLog("[sync] nothing to sync, aborting");
+    return;
+}
+
+// mapping OSX 
+
+string[] osx_keys = selectIssues("project = " + PROJECT_OSX);
+string[] osx_by_number;
+number max_osx_number = 0;
+
+for (number i = 0; i < arraySize(osx_keys); i++) {
+    string k = osx_keys[i];
+    number n = extractKeyNumber(k);
+    if (n < 0) { continue; }
+    osx_by_number[string(n)] = k;
+    if (n > max_osx_number) { max_osx_number = n; }
+}
+
+runnerLog("[sync] max OSX key = " + max_osx_number);
+
+// making placeholder's
+
+if (max_osx_number < max_os1_suffix) {
+    number to_create = max_os1_suffix - max_osx_number;
+
+    if (to_create > SAFETY_MAX_CREATE_PER_RUN) {
+        runnerLog("[sync] would create " + to_create + " placeholders, exceeds safety limit");
+        return;
+    }
+
+    runnerLog("[sync] creating " + to_create + " placeholders");
+
+    for (number i = 0; i < to_create; i++) {
+        string new_key = createIssue(PROJECT_OSX, "", PLACEHOLDER_ISSUE_TYPE, "placeholder");
+
+        if (isNull(new_key) || length(new_key) == 0) {
+            runnerLog("[sync] createIssue failed on iter " + i);
+            return;
+        }
+
+        setSecurityLevel(new_key, LEVEL_HIDDEN);
+        runnerLog("[sync] created placeholder " + new_key);
+    }
+
+    // remapping OSX
+    osx_keys = selectIssues("project = " + PROJECT_OSX);
+    osx_by_number = {};
+    max_osx_number = 0;
+    for (number i = 0; i < arraySize(osx_keys); i++) {
+        number n = extractKeyNumber(osx_keys[i]);
+        if (n < 0) { continue; }
+        osx_by_number[string(n)] = osx_keys[i];
+        if (n > max_osx_number) { max_osx_number = n; }
+    }
+}
+
+// processing pairs
+
+number initialized    = 0;
+number made_visible   = 0;
+number missing_in_osx = 0;
+
+string[] suffix_keys = arrayKeys(os1_by_suffix);
+for (number i = 0; i < arraySize(suffix_keys); i++) {
+    string sx = suffix_keys[i];
+    string osx_key = osx_by_number[sx];
+
+    if (isNull(osx_key) || length(osx_key) == 0) {
+        missing_in_osx = missing_in_osx + 1;
+        runnerLog("[sync] OS1 suffix " + sx + " has no OSX counterpart");
+        continue;
+    }
+
+    string os1_key  = os1_by_suffix[sx];
+    string jama_key = os1_jamakey_by_suffix[sx];
+
+    // checking hash on OSX — if empty it's first sync
+    string osx_hash = %osx_key%.HASH_FIELD;
+
+    if (isNull(osx_hash) || length(osx_hash) == 0) {
+        string h = hashString(jama_key);
+        string os1_summary = summary(os1_key);
+
+        %osx_key%.summary    = os1_summary;
+        %osx_key%.HASH_FIELD = h;
+        %os1_key%.HASH_FIELD = h;
+
+        initialized = initialized + 1;
+        runnerLog("[sync] init " + osx_key + " <-> " + os1_key + " hash=" + h);
+    }
+
+    // Toggle hidden -> visible
+    string current_level = securityLevel(osx_key);
+    if (current_level == LEVEL_HIDDEN) {
+        setSecurityLevel(osx_key, LEVEL_VISIBLE);
+        made_visible = made_visible + 1;
+        runnerLog("[sync] set visible: " + osx_key);
+    }
+}
+
+// hiding OSX having no OS1 pair
+
+number made_hidden = 0;
+
+string[] osx_numbers = arrayKeys(osx_by_number);
+for (number i = 0; i < arraySize(osx_numbers); i++) {
+    string num_str = osx_numbers[i];
+    string osx_key = osx_by_number[num_str];
+
+    if (isNotNull(os1_by_suffix[num_str])) { continue; }
+
+    string current_level = securityLevel(osx_key);
+    if (current_level == LEVEL_HIDDEN) { continue; }
+
+    setSecurityLevel(osx_key, LEVEL_HIDDEN);
+    made_hidden = made_hidden + 1;
+    runnerLog("[sync] set hidden: " + osx_key);
+}
+
+// exit report:
+
+runnerLog("[sync] === done ===");
+runnerLog("[sync] initialized: " + initialized);
+runnerLog("[sync] visible:     " + made_visible);
+runnerLog("[sync] hidden:      " + made_hidden);
+runnerLog("[sync] missing:     " + missing_in_osx);
