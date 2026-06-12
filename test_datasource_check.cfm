@@ -1,31 +1,46 @@
-<cfsetting requesttimeout="120" showdebugoutput="false">
+<cfprocessingdirective pageEncoding="utf-8">
+<cfsetting requesttimeout="3600" showdebugoutput="false">
 <cfscript>
-    dsn = "enquetes";
-    result = { ok = false, error = "", count = 0, tables = [] };
+    // ===== CONFIG =====
+    dsn       = "enquetes";
+    tableName = "dbo.Branches";    // <-- exact schema.table; fix if it's actually named differently
+    fileName  = "Branches.csv";
+    // ==================
+
     try {
-        q = queryExecute(
-            "SELECT TABLE_SCHEMA, TABLE_NAME
-               FROM INFORMATION_SCHEMA.TABLES
-              WHERE TABLE_TYPE = 'BASE TABLE'
-              ORDER BY TABLE_SCHEMA, TABLE_NAME",
-            [], { datasource: dsn }
-        );
-        for (row in q) arrayAppend(result.tables, row.TABLE_SCHEMA & "." & row.TABLE_NAME);
-        result.ok = true;
-        result.count = q.recordCount;
+        data = queryExecute("SELECT * FROM #tableName# WITH (NOLOCK)", [], { datasource: dsn });
     } catch (any e) {
-        result.error = e.message & " :: " & e.detail;
+        // on error: show a readable message instead of a broken download
+        writeOutput("<h3>Query failed for " & encodeForHtml(tableName) & "</h3><pre>"
+                  & encodeForHtml(e.message & " :: " & e.detail) & "</pre>");
+        abort;
     }
+
+    cols = listToArray(data.columnList);
+
+    // proper CSV escaping: NULL -> empty, double up quotes, wrap if value has quote/comma/newline
+    function csv(v){
+        if (isNull(arguments.v)) return "";
+        var s = toString(arguments.v);
+        if (find('"', s) || find(',', s) || find(chr(13), s) || find(chr(10), s))
+            s = '"' & replace(s, '"', '""', "all") & '"';
+        return s;
+    }
+
+    sb = createObject("java","java.lang.StringBuilder").init();
+    sb.append(chr(65279));   // UTF-8 BOM so Excel reads French accents correctly
+
+    hdr = [];
+    for (c in cols) arrayAppend(hdr, csv(c));
+    sb.append(arrayToList(hdr, ",") & chr(13) & chr(10));
+
+    for (row in data){
+        rec = [];
+        for (c in cols) arrayAppend(rec, csv(row[c]));
+        sb.append(arrayToList(rec, ",") & chr(13) & chr(10));
+    }
+
+    csvBytes = charsetDecode(sb.toString(), "utf-8");
 </cfscript>
-<cfoutput>
-<h2>Lucee dump self-test</h2>
-<p>Page executed: yes — раз ты это видишь, ни Lucee, ни app-auth страницу не блокнули.</p>
-<p>Datasource: <strong>#dsn#</strong></p>
-<cfif result.ok>
-    <p style="color:green">DATASOURCE OK — найдено base tables: #result.count#</p>
-    <ol><cfloop array="#result.tables#" index="t"><li>#t#</li></cfloop></ol>
-<cfelse>
-    <p style="color:red">DATASOURCE FAILED</p>
-    <pre>#encodeForHtml(result.error)#</pre>
-</cfif>
-</cfoutput>
+<cfheader name="Content-Disposition" value="attachment; filename=#fileName#">
+<cfcontent type="text/csv" variable="#csvBytes#" reset="true">
